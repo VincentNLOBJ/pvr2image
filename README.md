@@ -12,6 +12,8 @@ https://ko-fi.com/vincentnl
 https://www.patreon.com/VincentNL
 
 # How to use
+
+- [Download](https://github.com/VincentNLOBJ/pvr2image/releases) latest Win release or get `pvr2image.py` 
 - Open `pvr2image.exe` or `pvr2image.py`, select .pvr or .pvp (palette) files.
 - Select extract folder
 - Extracted files will be placed in a subfolder called `Extracted`, palettes in `ACT` folder.
