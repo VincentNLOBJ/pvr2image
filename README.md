@@ -13,11 +13,13 @@ https://www.patreon.com/VincentNL
 
 # How to use
 - Open `pvr2image.exe` or `pvr2image.py`, select .pvr or .pvp (palette) files.
-- The extracted files will be placed in `Extracted` folder where you run the application.
+- Select extract folder
+- Extracted files will be placed in a subfolder called `Extracted`, palettes in `ACT` folder.
 
 Please note:
 - If `.pvr` and companion `.pvp` are in the same folder with same name, the image will be exported with palette.
 - `.pvp` are automatically converted to `.act` for use with Photoshop or Gimp.
+- `.png` is the default export image type, you can change that by altering `pvr2image.py` code
 
 # Credits
 * Egregiousguy for YUV420 to YUV420p conversion
