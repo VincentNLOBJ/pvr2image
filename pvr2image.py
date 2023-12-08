@@ -662,7 +662,7 @@ class decode:
                             pvr_dim = [4, 8, 16, 32, 64, 128, 256, 512, 1024]
                             mip_size = [0x20, 0x80, 0x200, 0x800, 0x2000, 0x8000, 0x20000, 0x80000]
                             size_adjust = {2: 4, 6: 1, 8: 2, 10: 4, 15: 8, 18: 4}  # 8bpp size is 4bpp *2
-                            extra_mip = {2: 0x2c, 6: 0xc, 8: 0x17, 10: 0x2c, 15: 0x54,
+                            extra_mip = {2: 0x2c, 6: 0xc, 8: 0x18, 10: 0x2c, 15: 0x54,
                                          18: 0x30}  # smallest mips fixed size
 
                             for i in range(len(pvr_dim)):
