@@ -22,19 +22,73 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 '''
 
-from PIL import Image,ImagePalette
 import os
 import math
+import io
+import struct
+import numpy as np
+import zlib
 
 class decode:
 
-    debug=False
-
-    def __init__(self, files_lst,fmt,out_dir, flip):
+    def __init__(self, files_lst,fmt,out_dir, args_str):
         self.files_lst = files_lst
         self.out_dir = out_dir
         self.fmt = fmt
-        self.flip = flip
+        self.flip = None
+        self.log = False
+        self.silent = False
+        self.debug = False
+
+
+        args = args_str.split()  # Split the string into individual arguments
+
+        # Iterate through the arguments to find flip, log, and debug options
+        for arg in args:
+            if arg.startswith('-flip'):
+                # If -flip is found, extract the flip value
+                self.flip = arg[len('-flip'):]
+            elif arg == '-log':
+                self.log = True
+            elif arg == '-dbg':
+                self.debug = True
+            elif arg == '-silent':
+                self.silent = True
+
+        self.px_modes = {
+            0: 'ARGB1555',
+            1: 'RGB565',
+            2: 'ARGB4444',
+            3: 'YUV422',
+            4: 'BUMP',
+            5: 'RGB555',
+            6: 'YUV420',
+            7: 'ARGB8888',
+            8: 'PAL-4',
+            9: 'PAL-8',
+            10: 'AUTO',
+        }
+
+        self.tex_modes = {
+            1: 'Twiddled',
+            2: 'Twiddled + Mips',
+            3: 'Twiddled VQ',
+            4: 'Twiddled VQ + Mips',
+            5: 'Twiddled Pal4 (16-col)',
+            6: 'Twiddled Pal4 + Mips (16-col)',
+            7: 'Twiddled Pal8 (256-col)',
+            8: 'Twiddled Pal8 + Mips (256-col)',
+            9: 'Rectangle',
+            10: 'Rectangle + Mips',
+            11: 'Stride',
+            12: 'Stride + Mips',
+            13: 'Twiddled Rectangle',
+            14: 'BMP',
+            15: 'BMP + Mips',
+            16: 'Twiddled SmallVQ',
+            17: 'Twiddled SmallVQ + Mips',
+            18: 'Twiddled Alias + Mips',
+        }
 
         # remove companion .PVP/.PVR, filter the list
         new_list = []
@@ -49,6 +103,11 @@ class decode:
 
         # create Extracted\ACT folders
         if self.debug: print(out_dir + '\ACT')
+
+        # create log file
+        if self.log:
+            with open(f'{out_dir}/pvr_log.txt', 'w') as l:
+                l.write('')
 
         while current_file < selected_files:
             if not files_lst:  # If no files are selected
@@ -206,17 +265,238 @@ class decode:
 
         return act_buffer, mode, ttl_entries
 
-    def save_image(self,img, bits, file_name):
+    def image_flip(self, data, w, h,cmode):
+
+        if cmode == 'RGB':
+            pixels_len = 3
+        elif cmode == 'RGBA':
+            pixels_len = 4
+        else:
+            pixels_len = 1
+
+        if self.flip and'v' in self.flip:
+            data = (np.flipud((np.array(data)).reshape(h, w, -1)).flatten()).reshape(-1, pixels_len).tolist()
+
+        if self.flip and 'h' in self.flip:
+            data = (np.fliplr((np.array(data)).reshape(h, w, -1)).flatten()).reshape(-1, pixels_len).tolist()
+
+        return data
+
+    def save_image(self,file_name,data,bits,w,h,cmode,palette):
+
         if not os.path.exists(self.out_dir):
             os.makedirs(self.out_dir)
 
-        if 'v' in self.flip: img = img.transpose(Image.FLIP_TOP_BOTTOM)
-        if 'h' in self.flip: img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        if self.fmt == 'png':
+            self.save_png(file_name,data,bits,w,h,cmode,palette)
+        elif self.fmt == 'bmp':
+            self.save_bmp(file_name,data,bits,w,h,cmode,palette )
+        elif self.fmt == 'tga':
+            self.save_tga(file_name,data,bits,w,h,cmode,palette )
 
-        print(fr"{self.out_dir}\{file_name[:-4]}.{self.fmt}")
-        img.save((fr"{self.out_dir}\{file_name[:-4]}.{self.fmt}"), bits=bits)
+        if not self.silent:print(fr"{self.out_dir}\{file_name[:-4]}.{self.fmt}")
+
+    # Incomplete! Not supporting palettized images!
+    def save_tga(self, file_name,data,bits,w,h,cmode,palette=None):
+        # Define TGA header
+        tga_header = bytearray([0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, w & 255, (w >> 8) & 255,
+                                h & 255, (h >> 8) & 255, 32, 0])
+
+        # TGA is not reversed by default
+        pixel_data = bytearray()
+
+        # Iterate over the flattened array and append the pixel data
+        for pixel in data:
+            # Assuming pixel is in BGRA format
+            pixel_data.extend([pixel[2], pixel[1], pixel[0], pixel[3]])
+
+        # Combine the header and pixel data
+        tga_data = tga_header + pixel_data
+
+        # Save the TGA file
+        with open(fr'{self.out_dir}\{file_name[:-4]}.tga', "wb") as tga_file:
+            tga_file.write(tga_data)
+
+
+    def save_bmp(self, file_name, data, bits, w, h, cmode, palette=None):
+        # Define BMP file header
+        file_header = bytearray([66, 77, 54, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0]) # BMP string
+        pixel_data = bytearray()
+
+        # Define DIB header
+        if cmode == 'RGB':
+            bpp_var = 24
+        elif cmode == 'RGBA':
+            bpp_var = 32
+        else:
+            bpp_var = bits
+
+        #print(len(palette))
+        if 'PAL' in cmode:
+            # Add palette to DIB header
+            palette_data = bytearray()
+            for color in palette:
+                palette_data.extend([color[2], color[1], color[0], 0])  # Assuming RGB format, add padding
+        else:
+            palette_data = bytes()
+            palette = bytes(0)
+
+        dib_header = bytearray([40, 0, 0, 0,  # DIB header size
+                                w & 255, (w >> 8) & 255, (w >> 16) & 255, (w >> 24) & 255,  # Image width
+                                h & 255, (h >> 8) & 255, (h >> 16) & 255, (h >> 24) & 255,  # Image height
+                                1, 0,  # Color planes
+                                bpp_var, 0,  # Bits per pixel
+                                0, 0, 0, 0,  # Compression method (0 for uncompressed)
+                                0, 0, 0, 0,  # Image size (0 for uncompressed)
+                                0, 0, 0, 0,  # Horizontal resolution (pixels per meter)
+                                0, 0, 0, 0,  # Vertical resolution (pixels per meter)
+                                len(palette) & 255, (len(palette) >> 8) & 255, 0, 0,  # Number of colors in the palette
+                                0, 0, 0, 0])  # Number of important colors
+
+
+        # Combine the header and DIB header
+        header = file_header + dib_header + palette_data
+
+        if 'PAL' in cmode:
+            data = [item for sublist in data for item in sublist]
+            # Calculate the length of each index sublist
+
+            if cmode == 'RGB-PAL16':
+                sublist_length = w//2
+            else:
+                sublist_length = w  #'RGB-PAL256'
+
+            sublists = [data[i:i + sublist_length] for i in range(0, len(data), sublist_length)]
+            reversed_sublists = sublists[::-1]
+            pixel_data = bytes([item for sublist in reversed_sublists for item in sublist])
+
+        else:
+            # Bmp default order is left-right, bottom-top
+            for y in range(h - 1, -1, -1):
+                for x in range(w):
+                    # Assuming pixel is in BGRA format
+                    pixel = data[y * w + x]
+                    if cmode == 'RGBA':
+                        pixel_data.extend([pixel[2], pixel[1], pixel[0], pixel[3]])
+                    elif cmode == 'RGB':
+                        pixel_data.extend([pixel[2], pixel[1], pixel[0]])
+
+        # Combine the header, palette (if any), and pixel data
+        bmp_data = header + pixel_data
+
+        # Save the BMP file
+        with open(fr'{self.out_dir}\{file_name[:-4]}.bmp', "wb") as bmp_file:
+            bmp_file.write(bmp_data)
+
+
+    def save_png(self, file_name,data, bits, w, h, cmode, palette):
+
+        Pixel = None
+        #print(cmode)
+
+        if cmode == 'RGB':
+            Pixel = tuple[int, int, int]
+
+        elif cmode == 'RGBA':
+            Pixel = tuple[int, int, int, int]
+
+
+        image_data = list[list[Pixel]]
+
+        def encode_data(image_data: list[list[Pixel]]) -> list[int]:
+            ret = []
+
+            for row in image_data:
+                ret.extend([0] + [pixel for color in row for pixel in color])
+
+
+            return ret
+
+        def calculate_checksum(chunk_type: bytes, data: bytes) -> int:
+            checksum = zlib.crc32(chunk_type)
+            checksum = zlib.crc32(data, checksum)
+            return checksum
+
+        def palette_to_bytearray(palette):
+            # Ensure each RGB tuple has three components
+            palette = [tuple(rgb[:3]) for rgb in palette]
+
+            # Flatten the RGB tuples and pack them into a bytearray
+            byte_array = bytearray()
+            for rgb in palette:
+                byte_array.extend(struct.pack('BBB', *rgb))
+            return byte_array
+
+        color_type = 2  # truecolor by default
+
+        if cmode == 'RGB':
+            color_type = 2  # truecolor
+        elif cmode == 'RGBA':
+            color_type = 6  # truecolor with alpha
+        elif 'PAL' in cmode:
+            color_type = 3  # indexed color
+
+            # Convert palette to a bytearray
+            bytearray_palette = palette_to_bytearray(palette)
+
+        if 'PAL' in cmode:
+            # Create indexes
+            indexes = [item for sublist in data for item in sublist]
+            image_bytes = bytearray([0] + indexes)  # Filter type 0 for the first scanline
+
+            png_array = []
+
+            if cmode == 'RGB-PAL16':
+                row_lenght = (w // 2)
+            else:
+                row_lenght = (w)
+
+            for y in range(h):
+                png_array.append(0)  # Filter type 0 for each scanline
+                for x in range(row_lenght):
+                    png_array.append(x + y * row_lenght + 1)
+
+            # Rearrange indexes based on png_array order
+            image_data = bytearray([image_bytes[i] for i in png_array])
+
+        else:
+            # Arrange image data into rows
+            image_data= bytearray(encode_data([data[i:i + w] for i in range(0, len(data), w)]))
+
+
+        # Compress image data using zlib with compression level 0
+        compressed_data = zlib.compress(image_data,level=1)
+
+        # Write PNG signature
+        signature = b'\x89PNG\r\n\x1a\n'
+
+        with open(fr'{self.out_dir}\{file_name[:-4]}.png', "wb") as out:
+            out.write(signature)
+
+            # Write IHDR chunk
+            ihdr_chunk = struct.pack('!I', w) + struct.pack('!I', h) + bytes([bits, color_type, 0, 0, 0])
+            checksum = calculate_checksum(b'IHDR', ihdr_chunk)
+            out.write(struct.pack('!I', len(ihdr_chunk)) + b'IHDR' + ihdr_chunk + struct.pack('!I', checksum))
+
+            if 'PAL' in cmode:
+                # Write PLTE chunk
+                checksum = calculate_checksum(b'PLTE', bytearray_palette)
+                out.write(
+                    struct.pack('!I', len(bytearray_palette)) + b'PLTE' + bytearray_palette + struct.pack('!I',
+                                                                                                          checksum))
+
+            # Write IDAT chunk (compressed image data)
+            checksum = calculate_checksum(b'IDAT', compressed_data)
+            # print(struct.pack('!I', len(compressed_data)))
+            out.write(
+                struct.pack('!I', len(compressed_data)) + b'IDAT' + compressed_data + struct.pack('!I', checksum))
+
+            # Write IEND chunk
+            checksum = calculate_checksum(b'IEND', b'')
+            out.write(struct.pack('!I', 0) + b'IEND' + struct.pack('!I', checksum))
 
     def write_act(self,act_buffer, file_name):
+        #print(act_buffer)
 
         if not os.path.exists(self.out_dir + '\ACT'):
             os.makedirs(self.out_dir + '\ACT')
@@ -321,85 +601,86 @@ class decode:
 
         return arr
 
-    def decode_pvr(self,f, file_name, w, h, offset=None, px_format=None, tex_format=None, apply_palette=None,
+    def decode_pvr(self, f, file_name, w, h, offset=None, px_format=None, tex_format=None, apply_palette=None,
                    act_buffer=None):
-
-        # open the file a.pvr and read every byte according to the list
         f.seek(offset)
         data = bytearray()
 
-        # Exclude non twiddled formats + VQ
         if tex_format not in [9, 10, 11, 12, 14, 15]:
             arr = self.detwiddle(w, h)
 
-        # Palettized images loop
         if tex_format in [5, 6, 7, 8]:
+
+            cmode = None
             if tex_format in [7, 8]:  # 8bpp
                 palette_entries = 256
-                pixels = bytes(f.read(w * h))  # read only required amount of bytes
+                bits = 8
+                pixels = list(f.read(w * h))
+                data = [pixels[i] for i in arr]
 
-            else:  # 4bpp , convert to 8bpp
+                if self.flip != '':
+                    data = self.image_flip(data, w, h, cmode)
+                    # Flatten the nested list and convert each value to an integer
+                    data = [int(value) for sublist in data for value in sublist]
 
+                # 4bpp, convert to 8bpp
+            else:
                 palette_entries = 16
-                pixels = bytes(f.read(w * h // 2))  # read only required amount of bytes
+                bits = 4
+                pixels = bytearray(f.read(w * h // 2))  # read only required amount of bytes
+
+                # Read 4bpp to 8bpp indexes
+                data = []
                 for i in range(len(pixels)):
                     data.append(((pixels[i]) & 0x0f) * 0x11)  # last 4 bits
                     data.append((((pixels[i]) & 0xf0) >> 4) * 0x11)  # first 4 bits
 
-                pixels = data  # converted 4bpp --> 8bpp "data" back into "pixels" variable
+                # Assuming 'data' contains the 8bpp indexes
+                new_pixels = bytearray(data)
 
-            data = bytearray()
-            for num in arr:
-                data.append(pixels[num])
+                # Detwiddle 8bpp indexes
+                data = []
+                for num in arr:
+                    data.append(new_pixels[num])
 
-            # create a new image with grayscale data
-            img = Image.new('L', (w, h))
-            img.putdata(bytes(data))
+                if self.flip != '':
+                    data = self.image_flip(data, w, h, cmode)
 
-            if apply_palette == True:
-                new_palette = ImagePalette.raw("RGB", bytes(act_buffer))
-            else:
-                new_palette = ''
+                    # Flatten the nested list and convert each value to an integer
+                    data = [int(value) for sublist in data for value in sublist]
+
+                data = bytearray(data)  # 8bpp "twiddled data" back into "pixels" variable
+                # Convert back to 4bpp indexes with swapped upper and lower bits
+
+                converted_data = bytearray()
+                for i in range(0, len(data), 2):
+
+                    # Swap the position of upper and lower bits
+                    index1 = (data[i] // 0x11) << 4 | (data[i + 1] // 0x11)
+
+                    # Append the modified index to the converted data
+                    converted_data.append(index1)
+
+                data = converted_data
+
+            data = [data]
 
             if palette_entries == 16:
+                if apply_palette == True:
+                    palette = [tuple(act_buffer[i:i + 3]) for i in range(0, len(act_buffer), 3)]
 
-                img = img.convert('RGB')
-                img = img.convert('L', colors=16)
+                else:palette = [(i * 17, i * 17, i * 17) for i in range(16)]
+                cmode = 'RGB-PAL16'
 
-                # 16-col greyscale palette
-                pal_16_grey = []
-                for i in range(0, 16):
-                    pal_16_grey += [i * 17, i * 17, i * 17]
+            elif palette_entries == 256:
+                if apply_palette == True:
+                    palette = [tuple(act_buffer[i:i + 3]) for i in range(0, len(act_buffer), 3)]
 
-                # print(palette)
-                img = img.convert('P', colors=16)
-                img.putpalette(pal_16_grey)
 
-                if new_palette != '':
-                    # Set the image's palette to the loaded palette
+                else:palette = [(i, i, i) for i in range(256)]
+                cmode = 'RGB-PAL256'
 
-                    # Get the palette from the image
-                    img.getpalette()
-                    img.putpalette(new_palette)
-
-                self.save_image(img, 4, file_name)
-
-            else:
-                # Convert the image to a palettized grayscale 256 col
-                img = img.convert('L', colors=256)
-                img = img.convert('P', colors=256)
-
-                # Get the palette from the image
-                palette = img.getpalette()
-
-                # Set the palette in the same order as before
-                img.putpalette(palette)
-                if new_palette != '':
-                    # Set the image's palette to the loaded palette
-                    img.putpalette(new_palette)
-
-                # save the image
-                self.save_image(img, 8, file_name)
+            self.save_image(file_name, data, bits, w, h, cmode, palette)
 
         # VQ
         elif tex_format in [3, 4, 16, 17]:
@@ -432,6 +713,7 @@ class decode:
             codebook = []
 
             if px_format not in [3]:
+                cmode = 'RGBA'
                 for l in range(codebook_size):
                     block = []
                     for i in range(4):
@@ -444,7 +726,7 @@ class decode:
             # YUV422
 
             else:
-
+                cmode = 'RGB'
                 yuv_codebook = []
                 for l in range(codebook_size):
                     block = []
@@ -489,47 +771,56 @@ class decode:
 
             # Detwiddle image data indices, put them into arr list
             arr = self.detwiddle(int(w / 2), int(h / 2))
-            img = Image.new('RGBA', (w, h))
 
-            # i represent the current index from arr list
+            # Create an empty 2D array to store pixel data
+            image_array = [[(0, 0, 0, 0) for _ in range(w)] for _ in range(h)]
+
+            # Iterate over the blocks and update the pixel values in the array
             i = 0
-
-            for y in range(int(h / 2)):
-                for x in range(int(w / 2)):
-                    img.putpixel((x * 2 + 0, y * 2 + 0), codebook[pixel_list[arr[i]]][0])
-                    img.putpixel((x * 2 + 1, y * 2 + 0), codebook[pixel_list[arr[i]]][2])
-                    img.putpixel((x * 2 + 0, y * 2 + 1), codebook[pixel_list[arr[i]]][1])
-                    img.putpixel((x * 2 + 1, y * 2 + 1), codebook[pixel_list[arr[i]]][3])
+            for y in range(h//2):
+                for x in range(w//2):
+                    image_array[y * 2][x * 2] = codebook[pixel_list[arr[i]]][0]
+                    image_array[y * 2 + 1][x * 2] = codebook[pixel_list[arr[i]]][1]
+                    image_array[y * 2][x * 2 + 1] = codebook[pixel_list[arr[i]]][2]
+                    image_array[y * 2 + 1][x * 2 + 1] = codebook[pixel_list[arr[i]]][3]
                     i += 1
 
+            # Flatten the 2D array to a 1D list for putdata
+            data = [pixel for row in image_array for pixel in row]
+            if self.flip != '':
+                data = self.image_flip(data, w, h, cmode)
+
+            palette = ''
             # save the image
-            self.save_image(img, '', file_name)
+            self.save_image(file_name,data,8,w,h,cmode,palette)
 
         # BMP ABGR8888
         elif tex_format in [14, 15]:
             pixels = [int.from_bytes(f.read(4), 'little') for _ in range(w * h)]
-            rgb_values = [(self.read_col(14, p)) for p in pixels]
+            data = [(self.read_col(14, p)) for p in pixels]
 
-            # Create a new image and set pixel values using putdata
-            img = Image.new('RGBA', (w, h))
-            img.putdata(rgb_values)
+            palette = ''
+            cmode = 'RGBA'
+
+            if self.flip != '':
+                data = self.image_flip(data, w, h, cmode)
 
             # save the image
-            self.save_image(img, '', file_name)
+            self.save_image(file_name,data,8,w,h,cmode,palette)
 
         # BUMP loop
         elif px_format == 4:
             pixels = [int.from_bytes(f.read(2), 'little') for _ in range(w * h)]
-            rgb_values = [self.cart_to_rgb(self.process_SR(p)) for p in (pixels[i] for i in arr)]
+            data = [self.cart_to_rgb(self.process_SR(p)) for p in (pixels[i] for i in arr)]
 
-            # Create a new image and set pixel values using putdata
-            img = Image.new('RGB', (w, h))
-            img.putdata(rgb_values)
+            palette = ''
+            cmode = 'RGB'
+
+            if self.flip != '':
+                data = self.image_flip(data, w, h, cmode)
 
             # save the image
-            self.save_image(img, '', file_name)
-
-
+            self.save_image(file_name,data,8,w,h,cmode,palette)
 
         # ARGB modes
         elif px_format in [0, 1, 2, 5, 7, 18]:
@@ -537,33 +828,37 @@ class decode:
             pixels = [int.from_bytes(f.read(2), 'little') for _ in range(w * h)]
 
             if tex_format not in [9, 10, 11, 12, 14, 15]:  # If Twiddled
-                rgb_values = [(self.read_col(px_format, p)) for p in (pixels[i] for i in arr)]
+                data = [(self.read_col(px_format, p)) for p in (pixels[i] for i in arr)]
             else:
-                rgb_values = [(self.read_col(px_format, p)) for p in pixels]
+                data = [(self.read_col(px_format, p)) for p in pixels]
 
-            # Create a new image and set pixel values using putdata
-            img = Image.new('RGBA', (w, h))
-            img.putdata(rgb_values)
+            palette = ''
+            cmode = 'RGBA'
+
+            if self.flip != '':
+                data = self.image_flip(data, w, h, cmode)
 
             # save the image
-            self.save_image(img, '', file_name)
+            self.save_image(file_name,data,8,w,h,cmode,palette)
 
         # YUV420 modes
         elif px_format in [6]:
-            rgb_values = []
-            self.yuv420_to_rgb(f, w, h, rgb_values)
+            data = []
+            self.yuv420_to_rgb(f, w, h, data)
 
-            img = Image.new('RGB', (w, h))
-            img.putdata(rgb_values)
+            palette = ''
+            cmode = 'RGB'
+
+            if self.flip != '':
+                data = self.image_flip(data, w, h, cmode)
 
             # save the image
-            self.save_image(img, '', file_name)
+            self.save_image(file_name, data, 8,w, h, cmode, palette)
 
 
         # YUV422 modes
         elif px_format in [3]:
-            rgb_values = []
-            img = Image.new('RGB', (w, h))
+            data = []
 
             # Twiddled
             if tex_format not in [9, 10, 11, 12, 14, 15]:
@@ -578,9 +873,10 @@ class decode:
                         f.seek(offset + (arr[i] * 2))
                         yuv1 = int.from_bytes(f.read(2), 'little')
                         r0, g0, b0, r1, g1, b1 = self.read_col(px_format, (yuv0, yuv1))
-                        rgb_values.append((r0, g0, b0))
-                        rgb_values.append((r1, g1, b1))
+                        data.append((r0, g0, b0))
+                        data.append((r1, g1, b1))
                         i += 1
+
 
 
             else:
@@ -590,99 +886,100 @@ class decode:
                         yuv0 = int.from_bytes(f.read(2), 'little')
                         yuv1 = int.from_bytes(f.read(2), 'little')
                         r0, g0, b0, r1, g1, b1 = self.read_col(px_format, (yuv0, yuv1))
-                        rgb_values.append((r0, g0, b0))
-                        rgb_values.append((r1, g1, b1))
+                        data.append((r0, g0, b0))
+                        data.append((r1, g1, b1))
 
-            img.putdata(rgb_values)
+
+            palette = ''
+            cmode = 'RGB'
+
+            if self.flip != '':
+                data = self.image_flip(data, w, h, cmode)
+
             # save the image
-            self.save_image(img, '', file_name)
+            self.save_image(file_name,data,8,w,h,cmode,palette)
 
-    def load_pvr(self,PVR_file, apply_palette, act_buffer, file_name):
-        if self.debug: px_modes = {
-            0: 'ARGB1555',
-            1: 'RGB565',
-            2: 'ARGB4444',
-            3: 'YUV422',
-            4: 'BUMP',
-            5: 'RGB555',
-            6: 'YUV420',
-            7: 'ARGB8888',
-            8: 'PAL-4',
-            9: 'PAL-8',
-            10: 'AUTO',
-        }
-        # Tex format
-        if self.debug: tex_modes = {
-            1: 'Twiddled',
-            2: 'Twiddled Mips',
-            3: 'Twiddled VQ',
-            4: 'Twiddled VQ Mips',
-            5: 'Twiddled Pal4 (16-col)',
-            6: 'Twiddled Pal4 + Mips (16-col)',
-            7: 'Twiddled Pal8 (256-col)',
-            8: 'Twiddled Pal8 + Mips (256-col)',
-            9: 'Rectangle',
-            10: 'Rectangle + Mips',
-            11: 'Stride',
-            12: 'Stride + Mips',
-            13: 'Twiddled Rectangle',
-            14: 'BMP',
-            15: 'BMP + Mips',
-            16: 'Twiddled SmallVQ',
-            17: 'Twiddled SmallVQ + Mips',
-            18: 'Twiddled Alias + Mips',
-        }
+    def load_pvr(self, PVR_file, apply_palette, act_buffer, file_name):
+        px_modes = self.px_modes
+        tex_modes = self.tex_modes
 
-        try:
-            with open(PVR_file, 'rb') as f:
-                header_data = f.read()
-                offset = header_data.find(b"PVRT")
-                if offset != -1 or len(header_data) < 0x10:
-                    f.seek(offset + 0x8)
+        with open(PVR_file, 'rb') as f:
+            # Wrap file content in a BytesIO object
+            f_buffer = io.BytesIO(f.read())
 
-                    # Pixel format
-                    px_format = int.from_bytes(f.read(1), byteorder='little')
-                    tex_format = int.from_bytes(f.read(1), byteorder='little')
+            header_data = f_buffer.getvalue()
+            gbix_offset = header_data.find(b"GBIX")
 
-                    f.seek(f.tell() + 2)
-
-                    # Image size
-                    w = int.from_bytes(f.read(2), byteorder='little')
-                    h = int.from_bytes(f.read(2), byteorder='little')
-                    offset = f.tell()
-
-                    if self.debug: print(PVR_file.split('/')[-1], 'size:', w, 'x', h, 'format:',
-                                    f'[{tex_format}] {tex_modes[tex_format]}', f'[{px_format}] {px_modes[px_format]}')
-
-                    if tex_format in [2, 4, 6, 8, 10, 12, 15, 17, 18]:
-                        # print('mip-maps!')
-
-                        if tex_format in [2, 6, 8, 10, 15, 18]:
-                            # Mips skip
-                            pvr_dim = [4, 8, 16, 32, 64, 128, 256, 512, 1024]
-                            mip_size = [0x20, 0x80, 0x200, 0x800, 0x2000, 0x8000, 0x20000, 0x80000]
-                            size_adjust = {2: 4, 6: 1, 8: 2, 10: 4, 15: 8, 18: 4}  # 8bpp size is 4bpp *2
-                            extra_mip = {2: 0x2c, 6: 0xc, 8: 0x18, 10: 0x2c, 15: 0x54,
-                                         18: 0x30}  # smallest mips fixed size
-
-                            for i in range(len(pvr_dim)):
-                                if pvr_dim[i] == w:
-                                    mip_index = i - 1
-                                    break
-
-                            # Skip mips for image data offset
-                            mip_sum = (sum(mip_size[:mip_index]) * size_adjust[tex_format]) + (extra_mip[tex_format])
-
-                            offset += mip_sum
-                            # print(hex(offset))
-
-                    self.decode_pvr(f, file_name, w, h, offset, px_format, tex_format, apply_palette, act_buffer)
-
+            if gbix_offset != -1:
+                f_buffer.seek(gbix_offset + 0x4)
+                gbix_size = int.from_bytes(f_buffer.read(4), byteorder='little')
+                if gbix_size == 0x8:
+                    gbix_val1 = int.from_bytes(f_buffer.read(4), byteorder='little')
+                    gbix_val2 = int.from_bytes(f_buffer.read(4), byteorder='little')
+                    if self.debug:
+                        print(hex(gbix_val1), hex(gbix_val2))
+                elif gbix_size == 0x4:
+                    gbix_val1 = int.from_bytes(f_buffer.read(4), byteorder='little')
+                    gbix_val2 = ''
                 else:
-                    print("'PVRT' header not found!")
+                    print('invalid or unsupported GBIX size:', gbix_size, file_name)
+            else:
+                if self.debug:
+                    print('GBIX found at:', hex(gbix_offset))
+                gbix_val1 = ''
+                gbix_val2 = ''
 
-        except:
-            print(f'PVR data error! {PVR_file}')
+            offset = header_data.find(b"PVRT")
+            if offset != -1 or len(header_data) < 0x10:
+                f_buffer.seek(offset + 0x8)
+
+                # Pixel format
+                px_format = int.from_bytes(f_buffer.read(1), byteorder='little')
+                tex_format = int.from_bytes(f_buffer.read(1), byteorder='little')
+
+                f_buffer.seek(f_buffer.tell() + 2)
+
+                # Image size
+                w = int.from_bytes(f_buffer.read(2), byteorder='little')
+                h = int.from_bytes(f_buffer.read(2), byteorder='little')
+                offset = f_buffer.tell()
+
+                if self.debug:
+                    print(PVR_file.split('/')[-1], 'size:', w, 'x', h, 'format:',
+                          f'[{tex_format}] {tex_modes[tex_format]}', f'[{px_format}] {px_modes[px_format]}')
+
+                if tex_format in [2, 4, 6, 8, 10, 12, 15, 17, 18]:
+                    if tex_format in [2, 6, 8, 10, 15, 18]:
+                        # Mips skip
+                        pvr_dim = [4, 8, 16, 32, 64, 128, 256, 512, 1024]
+                        mip_size = [0x20, 0x80, 0x200, 0x800, 0x2000, 0x8000, 0x20000, 0x80000]
+                        size_adjust = {2: 4, 6: 1, 8: 2, 10: 4, 15: 8, 18: 4}  # 8bpp size is 4bpp *2
+                        extra_mip = {2: 0x2c, 6: 0xc, 8: 0x18, 10: 0x2c, 15: 0x54,
+                                     18: 0x30}  # smallest mips fixed size
+
+                        for i in range(len(pvr_dim)):
+                            if pvr_dim[i] == w:
+                                mip_index = i - 1
+                                break
+
+                        mip_sum = (sum(mip_size[:mip_index]) * size_adjust[tex_format]) + (extra_mip[tex_format])
+
+                        offset += mip_sum
+
+                self.decode_pvr(f_buffer, file_name, w, h, offset, px_format, tex_format, apply_palette, act_buffer)
+
+                if self.log:
+                    log_content = (
+                        f"Filename: {PVR_file}, size: {w}x{h}, format: {tex_modes[tex_format]}, "
+                        f"mode: {px_modes[px_format]}"
+                        f"{f', GBIX: {gbix_val1}' if gbix_val1 else ''}"
+                        f"{f' + {gbix_val2}' if gbix_val2 else ''}\n"
+                    )
+
+                    with open(f'{self.out_dir}/pvr_log.txt', 'a') as l:
+                        l.write(log_content)
+            else:
+                print("'PVRT' header not found!")
 
     def load_pvp(self,PVP_file, act_buffer, file_name):
         try:
@@ -712,7 +1009,7 @@ class decode:
     def cart_to_rgb(self,cval):
         return tuple(int(c * 255) for c in cval)
 
-    def yuv420_to_rgb(self,f, w, h, rgb_values):
+    def yuv420_to_rgb(self,f, w, h, data):
         # Credits to Egregiousguy for YUV420 --> YUV420P conversion
         buffer = bytearray()
 
@@ -753,8 +1050,8 @@ class decode:
             for n in range(col):
                 buffer += Y23[n]
 
-        for data in U + V:
-            buffer += data
+        for datauv in U + V:
+            buffer += datauv
 
         # Extract Y, U, and V components from the buffer
         Y = list(buffer[:int(w * h)])
@@ -783,5 +1080,5 @@ class decode:
                 r = int(max(0, min(255, round(y + 1.402 * (v - 128)))))
                 g = int(max(0, min(255, round(y - 0.344136 * (u - 128) - 0.714136 * (v - 128)))))
                 b = int(max(0, min(255, round(y + 1.772 * (u - 128)))))
-                rgb_values.append((r, g, b))
-        return rgb_values
+                data.append((r, g, b))
+        return data
