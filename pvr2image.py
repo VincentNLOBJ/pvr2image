@@ -1,7 +1,7 @@
 '''
 MIT License
 
-Copyright (c) 2023 VincentNL
+Copyright (c) 2023-2024 VincentNL
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -31,29 +31,43 @@ import zlib
 
 class decode:
 
-    def __init__(self, files_lst,fmt,out_dir, args_str):
+    def __init__(self, files_lst=None, fmt=None, out_dir=None, args_str=None):
         self.files_lst = files_lst
         self.out_dir = out_dir
         self.fmt = fmt
-        self.flip = None
-        self.log = False
-        self.silent = False
-        self.debug = False
+        self.flip = ""  # Default value for flip
+        self.log = False  # Default value for log flag
+        self.silent = False  # Default value for silent flag
+        self.debug = False  # Default value for debug flag
 
+        if len(files_lst)==0 or files_lst == '':
+            print('No file specified!')
+            return
 
-        args = args_str.split()  # Split the string into individual arguments
+        if fmt is None:
+            self.fmt = "png"
 
-        # Iterate through the arguments to find flip, log, and debug options
-        for arg in args:
-            if arg.startswith('-flip'):
-                # If -flip is found, extract the flip value
-                self.flip = arg[len('-flip'):]
-            elif arg == '-log':
-                self.log = True
-            elif arg == '-dbg':
-                self.debug = True
-            elif arg == '-silent':
-                self.silent = True
+        if out_dir is None:
+            self.out_dir = os.path.abspath(os.path.dirname(files_lst[0]))
+        else:
+            self.out_dir = out_dir
+
+        # Determine out_dir
+        if args_str:
+            args = args_str.split()  # Split the string into individual arguments
+
+            # Iterate through the arguments to find flip, log, and debug options
+            for arg in args:
+                if arg.startswith('-flip'):
+                    # If -flip is found, extract the flip value
+                    self.flip = arg[len('-flip'):]
+                elif arg == '-log':
+                    self.log = True
+                elif arg == '-dbg':
+                    self.debug = True
+                elif arg == '-silent':
+                    self.silent = True
+
 
         self.px_modes = {
             0: 'ARGB1555',
@@ -134,49 +148,48 @@ class decode:
 
             current_file += 1
 
-
     def read_col(self,px_format, color):
 
         if px_format == 0:  # ARGB1555
-            a = 0xff if ((color >> 15) & 1) else 0
-            r = (color >> (10 - 3)) & 0xf8
-            g = (color >> (5 - 3)) & 0xf8
-            b = (color << 3) & 0xf8
+            a = ((color >> 15) & 0x1) * 0xff
+            r = int(((color >> 10) & 0x1f) * 0xff / 0x1f)
+            g = int(((color >> 5) & 0x1f) * 0xff / 0x1f)
+            b = int((color & 0x1f) * 0xff / 0x1f)
             return (r, g, b, a)
 
         elif px_format == 1:  # RGB565
             a = 0xff
-            r = (color >> (11 - 3)) & (0x1f << 3)
-            g = (color >> (5 - 2)) & (0x3f << 2)
-            b = (color << 3) & (0x1f << 3)
+            r = int(((color >> 11) & 0x1f) * 0xff / 0x1f)
+            g = int(((color >> 5) & 0x3f) * 0xff / 0x3f)
+            b = int((color & 0x1f) * 0xff / 0x1f)
             return (r, g, b, a)
 
         elif px_format == 2:  # ARGB4444
-            a = (color >> (12 - 4)) & 0xf0
-            r = (color >> (8 - 4)) & 0xf0
-            g = (color >> (4 - 4)) & 0xf0
-            b = (color << 4) & 0xf0
+            a = ((color >> 12) & 0xf)*0x11
+            r = ((color >> 8) & 0xf)*0x11
+            g = ((color >> 4) & 0xf)*0x11
+            b = (color & 0xf)*0x11
             return (r, g, b, a)
 
         elif px_format == 5:  # RGB555
             a = 0xFF
-            r = (color >> (10 - 3)) & 0xf8
-            g = (color >> (5 - 3)) & 0xf8
-            b = (color << 3) & 0xf8
+            r = int(((color >> 10) & 0x1f) * 0xff / 0x1f)
+            g = int(((color >> 5) & 0x1f) * 0xff / 0x1f)
+            b = int((color & 0x1f) * 0xff / 0x1f)
             return (r, g, b, a)
 
         elif px_format in [7]:  # ARGB8888
             a = (color >> 24) & 0xFF
             r = (color >> 16) & 0xFF
             g = (color >> 8) & 0xFF
-            b = (color >> 0) & 0xFF
+            b = color & 0xFF
             return (r, g, b, a)
 
         elif px_format in [14]:  # RGBA8888
             r = (color >> 24) & 0xFF
             g = (color >> 16) & 0xFF
             b = (color >> 8) & 0xFF
-            a = (color >> 0) & 0xFF
+            a = color & 0xFF
             return (r, g, b, a)
 
         elif px_format == 3:
@@ -408,7 +421,6 @@ class decode:
 
             for row in image_data:
                 ret.extend([0] + [pixel for color in row for pixel in color])
-
 
             return ret
 
@@ -972,8 +984,8 @@ class decode:
                     log_content = (
                         f"Filename: {PVR_file}, size: {w}x{h}, format: {tex_modes[tex_format]}, "
                         f"mode: {px_modes[px_format]}"
-                        f"{f', GBIX: {gbix_val1}' if gbix_val1 else ''}"
-                        f"{f' + {gbix_val2}' if gbix_val2 else ''}\n"
+                        f"{f', GBIX: {gbix_val1}' if gbix_val1 != '' else ', GBIX1: ---'}"
+                        f"{f', GBIX2: {gbix_val2}' if gbix_val2 != '' else ', GBIX2: ---'}\n"
                     )
 
                     with open(f'{self.out_dir}/pvr_log.txt', 'a') as l:
