@@ -27,6 +27,7 @@ Please note:
 * Egregiousguy for YUV420 to YUV420p conversion
 * Kion for VQ handling and logic
 * tvspelsfreak for SR conversion info on Bump to normal map
+* MetalliC and Tcaw for 4444/565/555/1555 modes color value fix
 
 # Supported PVR types
 
